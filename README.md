@@ -49,11 +49,12 @@ The system follows a structured pipeline:
 
 ---
 
-## Dataset
-Dataset used: TON_IoT Network Dataset  
-https://research.unsw.edu.au/projects/toniot-datasets
+## Dataset: TON_IoT Network Dataset
+Name: TON_IoT Network Dataset — IoT/IIoT network traffic for intrusion detection
+Provider: Cyber Range & IoT Labs, UNSW Canberra (SEIT) — TON_IoT dataset collection
+Official page: https://research.unsw.edu.au/projects/toniot-datasets
+License: Creative Commons Attribution 4.0 International (CC BY 4.0) (see the TON_IoT site for details)
 
-Due to size limitations, the dataset is not included in this repository.
-
+This repository uses the train/test network flows subset often distributed as train_test_network.csv (~29.9 MB; 44 columns). The flows were captured in realistic IoT/IIoT smart-environment scenarios using tools such as Argus and Bro (Zeek). The dataset contains benign and malicious traffic and is suitable for intrusion detection, anomaly detection, and ML benchmarking.
 Download it from:
 https://www.kaggle.com/datasets/arnobbhowmik/ton-iot-network-dataset
