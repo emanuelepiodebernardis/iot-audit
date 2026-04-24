@@ -1,6 +1,6 @@
 # IoT/IIoT Intrusion Detection System using Machine Learning
 
-Author: Emanuele De Bernardis  
+Author: Emanuele Pio De Bernardis  
 Affiliation: Università eCampus  
 License: MIT  
 
