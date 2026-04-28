@@ -100,3 +100,25 @@ License: Creative Commons Attribution 4.0 International (CC BY 4.0) (see the TON
 This repository uses the train/test network flows subset often distributed as train_test_network.csv (~29.9 MB; 44 columns). The flows were captured in realistic IoT/IIoT smart-environment scenarios using tools such as Argus and Bro (Zeek). The dataset contains benign and malicious traffic and is suitable for intrusion detection, anomaly detection, and ML benchmarking.
 Download it from:
 https://www.kaggle.com/datasets/arnobbhowmik/ton-iot-network-dataset
+
+## Dataset: CIC-IoT Dataset 2023
+Name: CIC IoT Dataset 2023
+Provider: Canadian Institute for Cybersecurity (CIC), University of New Brunswick
+Official page: https://www.unb.ca/cic/datasets/iotdataset-2023.html
+License: Research/academic use (as defined by CIC dataset policy)
+
+This dataset contains modern IoT network traffic capturing:
+
+real-world IoT communications
+diverse attack scenarios
+updated attack patterns compared to older CIC datasets
+
+It is used in this project for:
+
+external validation (cross-domain testing)
+robustness evaluation of trained models
+domain shift analysis between TON_IoT and CIC-IoT environments
+
+Key purpose:
+
+evaluating model generalization beyond the training distribution
