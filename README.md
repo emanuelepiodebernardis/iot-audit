@@ -34,7 +34,7 @@ difficulty in generalizing detection models across environments
 
 This project addresses these challenges by focusing on:
 
-detection of network-based cyberattacks, including:
+Detection of network-based cyberattacks, including:
 DoS / DDoS attacks
 Man-in-the-Middle (MITM) attacks
 botnet activity
