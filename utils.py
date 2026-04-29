@@ -67,31 +67,6 @@ DEFAULT_CARDINALITY_THRESHOLD = 20
 class DataFramePreprocessor(BaseEstimator, TransformerMixin):
     """
     Wrapper attorno a ColumnTransformer che preserva i nomi delle feature.
-
-    ColumnTransformer.transform() restituisce un ndarray. Quando questo
-    viene passato a LightGBM (e in alcuni casi a XGBoost) dopo un fit()
-    in cui il modello ha memorizzato i feature names, scikit-learn lancia:
-        UserWarning: X does not have valid feature names, but
-        LGBMClassifier was fitted with feature names.
-
-    Questo wrapper intercetta l'output di transform() e lo converte in un
-    pd.DataFrame con i nomi corretti da get_feature_names_out(), eliminando
-    il warning alla radice senza alterare la logica del preprocessing.
-
-    Parametri
-    ----------
-    column_transformer : ColumnTransformer
-        L'istanza (già configurata, non ancora fittata) da avvolgere.
-
-    Note
-    ----
-    - sklearn >= 1.0 richiesta per get_feature_names_out().
-    - I nomi prodotti da ColumnTransformer seguono il pattern
-      "pipeline_name__feature_name", es. "num__bytes_total",
-      "cat__proto_unified_tcp". Questo è il comportamento standard e
-      non viene alterato.
-    - sparse_threshold=0 è impostato internamente per garantire output
-      denso (necessario per la conversione in DataFrame).
     """
 
     def __init__(self, column_transformer: ColumnTransformer):
@@ -145,11 +120,6 @@ def build_preprocessor(
 ) -> Tuple[DataFramePreprocessor, List[str], List[str]]:
     """
     Build preprocessing pipeline (numeric + categorical).
-
-    Restituisce un DataFramePreprocessor (non un ColumnTransformer raw)
-    in modo che l'output di transform() sia sempre un DataFrame con nomi
-    di colonna validi. Questo elimina i UserWarning di LightGBM/XGBoost
-    sul mismatch tra feature names al fit e alla predizione.
     """
     numeric_features, categorical_features = infer_feature_types(X, threshold)
 
@@ -376,15 +346,6 @@ def cross_validate_binary_models(
 ):
     """
     Perform stratified cross-validation.
-
-    NOTA SUL FIX WARNING:
-    In precedenza build_preprocessor restituiva un ColumnTransformer raw.
-    Il suo output .transform() era un ndarray senza nomi. LightGBM
-    memorizza i feature names al fit() e li confronta al predict():
-    se non coincidono emette UserWarning.
-
-    Con DataFramePreprocessor il transform() restituisce un DataFrame
-    con i nomi corretti, e il warning non viene mai generato.
     """
     if models is None:
         models = get_models()
