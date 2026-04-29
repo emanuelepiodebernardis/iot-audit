@@ -23,6 +23,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, label_binarize
+from sklearn.base import BaseEstimator, TransformerMixin
 
 from sklearn.metrics import (
     accuracy_score,
@@ -60,6 +61,62 @@ DEFAULT_CARDINALITY_THRESHOLD = 20
 
 
 # =========================================================================
+# FIX CORE: DataFramePreprocessor
+# =========================================================================
+
+class DataFramePreprocessor(BaseEstimator, TransformerMixin):
+    """
+    Wrapper attorno a ColumnTransformer che preserva i nomi delle feature.
+
+    ColumnTransformer.transform() restituisce un ndarray. Quando questo
+    viene passato a LightGBM (e in alcuni casi a XGBoost) dopo un fit()
+    in cui il modello ha memorizzato i feature names, scikit-learn lancia:
+        UserWarning: X does not have valid feature names, but
+        LGBMClassifier was fitted with feature names.
+
+    Questo wrapper intercetta l'output di transform() e lo converte in un
+    pd.DataFrame con i nomi corretti da get_feature_names_out(), eliminando
+    il warning alla radice senza alterare la logica del preprocessing.
+
+    Parametri
+    ----------
+    column_transformer : ColumnTransformer
+        L'istanza (già configurata, non ancora fittata) da avvolgere.
+
+    Note
+    ----
+    - sklearn >= 1.0 richiesta per get_feature_names_out().
+    - I nomi prodotti da ColumnTransformer seguono il pattern
+      "pipeline_name__feature_name", es. "num__bytes_total",
+      "cat__proto_unified_tcp". Questo è il comportamento standard e
+      non viene alterato.
+    - sparse_threshold=0 è impostato internamente per garantire output
+      denso (necessario per la conversione in DataFrame).
+    """
+
+    def __init__(self, column_transformer: ColumnTransformer):
+        self.column_transformer = column_transformer
+
+    def fit(self, X, y=None):
+        # Forza output denso: senza questo, con OneHotEncoder sparse,
+        # il toarray() implicito in DataFrame() fallirebbe.
+        self.column_transformer.set_params(sparse_threshold=0)
+        self.column_transformer.fit(X, y)
+        self._feature_names = self.column_transformer.get_feature_names_out()
+        return self
+
+    def transform(self, X):
+        arr = self.column_transformer.transform(X)
+        # Converti in array denso se sparse (fallback di sicurezza)
+        if hasattr(arr, "toarray"):
+            arr = arr.toarray()
+        return pd.DataFrame(arr, columns=self._feature_names)
+
+    def get_feature_names_out(self, input_features=None):
+        return self._feature_names
+
+
+# =========================================================================
 # FEATURE HANDLING
 # =========================================================================
 
@@ -85,9 +142,14 @@ def infer_feature_types(
 def build_preprocessor(
     X: pd.DataFrame,
     threshold: int = DEFAULT_CARDINALITY_THRESHOLD
-) -> Tuple[ColumnTransformer, List[str], List[str]]:
+) -> Tuple[DataFramePreprocessor, List[str], List[str]]:
     """
     Build preprocessing pipeline (numeric + categorical).
+
+    Restituisce un DataFramePreprocessor (non un ColumnTransformer raw)
+    in modo che l'output di transform() sia sempre un DataFrame con nomi
+    di colonna validi. Questo elimina i UserWarning di LightGBM/XGBoost
+    sul mismatch tra feature names al fit e alla predizione.
     """
     numeric_features, categorical_features = infer_feature_types(X, threshold)
 
@@ -98,18 +160,19 @@ def build_preprocessor(
 
     categorical_transformer = Pipeline([
         ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("onehot", OneHotEncoder(handle_unknown="ignore")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
     ])
 
-    preprocessor = ColumnTransformer(
+    ct = ColumnTransformer(
         transformers=[
             ("num", numeric_transformer, numeric_features),
             ("cat", categorical_transformer, categorical_features),
         ],
         remainder="drop",
-        sparse_threshold=0.3,
+        sparse_threshold=0,          # sempre denso
     )
 
+    preprocessor = DataFramePreprocessor(ct)
     return preprocessor, numeric_features, categorical_features
 
 
@@ -160,6 +223,7 @@ def get_models(
             colsample_bytree=0.8,
             random_state=random_state,
             n_jobs=-1,
+            verbose=-1,               # silenzia log LightGBM interni
         )
 
     return models
@@ -312,6 +376,15 @@ def cross_validate_binary_models(
 ):
     """
     Perform stratified cross-validation.
+
+    NOTA SUL FIX WARNING:
+    In precedenza build_preprocessor restituiva un ColumnTransformer raw.
+    Il suo output .transform() era un ndarray senza nomi. LightGBM
+    memorizza i feature names al fit() e li confronta al predict():
+    se non coincidono emette UserWarning.
+
+    Con DataFramePreprocessor il transform() restituisce un DataFrame
+    con i nomi corretti, e il warning non viene mai generato.
     """
     if models is None:
         models = get_models()
@@ -329,6 +402,8 @@ def cross_validate_binary_models(
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
+            # build_preprocessor ora restituisce DataFramePreprocessor
+            # → output di transform() è sempre pd.DataFrame con colnames
             preprocessor, _, _ = build_preprocessor(X_train)
 
             pipe = Pipeline([
@@ -361,6 +436,11 @@ def cross_validate_binary_models(
         pd.concat(all_fold_rows, ignore_index=True),
         pd.DataFrame(summary_rows).sort_values("f1_mean", ascending=False)
     )
+
+
+# =========================================================================
+# VISUALIZATION
+# =========================================================================
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -409,6 +489,7 @@ def plot_metric_comparison(df_results, metric_col, title, filename, sort_desc=Tr
     plt.savefig(filename)
     plt.close()
 
+
 def plot_cv_metric_comparison(df_results, metric_col, title, filename, sort_desc=True):
     mean_col = f"{metric_col}_mean"
     std_col = f"{metric_col}_std"
@@ -436,6 +517,7 @@ def plot_cv_metric_comparison(df_results, metric_col, title, filename, sort_desc
     plt.tight_layout()
     plt.savefig(filename)
     plt.close()
+
 
 def get_shap_class_index(class_name: str, label_encoder):
     """
