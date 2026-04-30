@@ -15,6 +15,14 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+# DataFramePreprocessor da utils: preserva i nomi delle feature dopo transform(),
+# eliminando i UserWarning di LightGBM sui feature names nel flusso cross-dataset.
+try:
+    from utils import DataFramePreprocessor
+    _HAS_DFP = True
+except ImportError:
+    _HAS_DFP = False
+
 warnings.filterwarnings("ignore")
 
 # =============================================================================
@@ -167,7 +175,14 @@ def build_unified_features_cic(df: pd.DataFrame) -> pd.DataFrame:
 # PREPROCESSOR
 # =============================================================================
 
-def build_unified_preprocessor() -> ColumnTransformer:
+def build_unified_preprocessor():
+    """
+    Costruisce il preprocessor unificato per il flusso cross-dataset.
+
+    Restituisce DataFramePreprocessor (se utils disponibile) o ColumnTransformer.
+    DataFramePreprocessor preserva i nomi delle feature dopo transform(),
+    eliminando i UserWarning di LightGBM nel flusso cross-dataset.
+    """
     num = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
         ("scaler", StandardScaler()),
@@ -178,10 +193,14 @@ def build_unified_preprocessor() -> ColumnTransformer:
         ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
     ])
 
-    return ColumnTransformer([
+    ct = ColumnTransformer([
         ("num", num, UNIFIED_NUMERIC_FEATURES),
         ("cat", cat, UNIFIED_CATEGORICAL_FEATURES),
-    ])
+    ], sparse_threshold=0)
+
+    if _HAS_DFP:
+        return DataFramePreprocessor(ct)
+    return ct
 
 
 # =============================================================================
