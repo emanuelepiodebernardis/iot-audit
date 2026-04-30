@@ -1,4 +1,38 @@
+/*
+ * =========================================================================
+ * Decision Tree (max_depth=5) — export m2cgen per Arduino Mega 2560
+ * =========================================================================
+ * Generato da: m2cgen.export_to_c(dt_model) — soglie REALI
+ * Dataset:     TON_IoT (train_test_network.csv)
+ * Features:    95 (output DataFramePreprocessor: StandardScaler + OHE)
+ * Target:      binario (0=normal, 1=attack)
+ *
+ * Dimensione sorgente: 4.76 KB  |  SRAM stimata: 4.76 KB
+ * Limite Arduino Mega 2560:  8 KB SRAM  →  RIENTRA ✓
+ *
+ * F1 = 0.9943  |  ROC-AUC = 0.9856
+ * Foglie totali: 26  |  Profondità massima: 5
+ *
+ * NOTA TECNICA — firma m2cgen per DecisionTreeClassifier:
+ *   void score(double* input, double* output)
+ *   output[0] = P(normal)   output[1] = P(attack)
+ *   Predizione: attack se output[1] > output[0]
+ *   Questa firma è DIVERSA da logreg.c: vedi predict() sotto.
+ *
+ * Deploy Arduino: copiare in progetto, includere in main.ino.
+ * =========================================================================
+ */
+
 #include <string.h>
+
+/*
+ * score() — valuta l'albero e scrive le probabilità di classe in output.
+ *
+ * input:    array double di 95 feature preprocessate
+ * output:   array double di 2 elementi
+ *             output[0] = probabilità classe 0 (normal)
+ *             output[1] = probabilità classe 1 (attack)
+ */
 void score(double * input, double * output) {
     double var0[2];
     if (input[17] <= 0.5) {
@@ -103,4 +137,14 @@ void score(double * input, double * output) {
         }
     }
     memcpy(output, var0, 2 * sizeof(double));
+}
+
+/*
+ * predict() — classificazione binaria dall'output dell'albero.
+ * return: 1 = attack (output[1] > output[0]), 0 = normal
+ */
+int predict(double * input) {
+    double out[2];
+    score(input, out);
+    return out[1] > out[0] ? 1 : 0;
 }

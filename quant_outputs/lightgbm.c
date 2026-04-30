@@ -1,3 +1,30 @@
+/*
+ * =========================================================================
+ * LightGBM (400 alberi, num_leaves=31) — export m2cgen
+ * =========================================================================
+ * Generato da: m2cgen.export_to_c(lgb_model)  — valori REALI
+ * Dataset:     TON_IoT (train_test_network.csv)
+ * Features:    95 (output DataFramePreprocessor: StandardScaler + OHE)
+ * Target:      binario (0=normal, 1=attack)
+ *
+ * Metriche sul test set (38.095 campioni):
+ *   F1 = 0.9992  |  ROC-AUC = 1.0000
+ *
+ * Dimensione sorgente: 2437.70 KB  (2.4 MB)
+ * ATTENZIONE: supera i limiti SRAM di qualsiasi MCU comune.
+ *   Arduino Mega 2560:  Flash 256 KB  ->  NON compatibile
+ *   ESP32-C3:           SRAM  400 KB  ->  NON compatibile
+ * Il file e' incluso nel repository per documentazione e
+ * per eventuale deploy su hardware con Flash >= 4 MB
+ * (es. ESP32-S3, Raspberry Pi Pico 2).
+ *
+ * Firma funzione m2cgen:
+ *   void score(double * input, double * output)
+ *   output[0] = P(normal),  output[1] = P(attack)
+ *   predict: output[1] > output[0] -> attack
+ * =========================================================================
+ */
+
 #include <math.h>
 #include <string.h>
 double sigmoid(double x) {
