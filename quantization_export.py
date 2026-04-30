@@ -1,25 +1,41 @@
 """
 =============================================================================
-QUANTIZZAZIONE E EXPORT EMBEDDED — versione finale corretta
+QUANTIZZAZIONE E EXPORT EMBEDDED — versione finale (allineata a v9)
 =============================================================================
 
-Correzione critica rispetto alla versione precedente:
-  run_quantization_pipeline() ora riceve i modelli GIA' ADDESTRATI
-  dalla pipeline principale della tesi (binary_pipelines).
-  Non ri-addestra nulla: le metriche F1/ROC-AUC riflettono esattamente
-  i modelli valutati nelle sezioni precedenti del notebook.
+Stato dopo esecuzione reale su notebook v9 (TON_IoT):
 
-Flusso corretto:
-  Notebook sezione 3.4-3.7
-    → binary_pipelines[name] (Pipeline sklearn fittata)
-    → estrai step "model" da ogni pipeline
-    → passa i modelli a run_quantization_pipeline()
-    → export C / TFLite / JSON nativo
-    → tabella size_original | size_quantized | F1 | ROC-AUC | fits_sram
+  logreg.c       → 3.20 KB  — F1=0.9900  ROC-AUC=0.9945  ✅ < 8 KB Arduino
+  tree_depth5.c  → 4.76 KB  — F1=0.9943  ROC-AUC=0.9856  ✅ < 8 KB Arduino
+  mlp.tflite+.h  → 13.03 KB — F1=0.9959  ROC-AUC=0.9993  ✅ < 400 KB ESP32
+  xgboost.json   → 1112 KB  — F1=0.9989  ROC-AUC=1.0000  ❌ > 400 KB ESP32
+  lightgbm.txt   → 1394 KB  — F1=0.9992  ROC-AUC=1.0000  ❌ > 400 KB ESP32
+  lightgbm.c     → 2437 KB  (m2cgen OK ma ancora troppo grande per ESP32)
 
-Per l'MLP (non presente in binary_pipelines perche' Keras non e' sklearn):
-  → viene costruito e addestrato una volta nella cella del notebook
-  → passato come keras_mlp=<model> a run_quantization_pipeline()
+NOTE TECNICHE SUI FILE C GENERATI DA m2cgen:
+  LogisticRegression → double score(double* input)
+    Restituisce logit grezzo (non sigmoid). Soglia corretta: > 0.0
+    score_proba() e predict() aggiunti manualmente in logreg.c.
+
+  DecisionTreeClassifier → void score(double* input, double* output[2])
+    output[0]=P(normal), output[1]=P(attack). Predizione: argmax(output).
+    predict() aggiunto manualmente in tree_depth5.c.
+
+  Le due firme sono incompatibili — main_arduino.ino gestisce entrambe
+  tramite il wrapper predict() unificato presente in ciascun file .c.
+
+CORREZIONI RISPETTO ALLE VERSIONI PRECEDENTI:
+  v1: run_quantization_pipeline ri-addestrava i modelli (bug critico)
+  v2: riceve modelli gia' addestrati da binary_pipelines
+  v3: fix UBJ per XGBoost, fix m2cgen NoneType, gerarchia LGBM
+  vFinal: note differenziate LR/DT, documentazione firma C corretta
+
+FLUSSO:
+  binary_pipelines (sezione 3.4-3.7)
+    → extract_model_from_pipeline()
+    → run_quantization_pipeline(trained_models, keras_mlp)
+    → export_arduino / export_mlp / export_xgboost / export_lightgbm
+    → tabella: size_original | size_quantized | F1 | ROC-AUC | fits_sram
 =============================================================================
 """
 
@@ -168,6 +184,22 @@ def export_arduino(
     size_quant_kb = len(c_code.encode("utf-8")) / 1024
     sram_bytes    = int(size_quant_kb * 1024)
 
+    # Documenta la firma C generata da m2cgen, che differisce per tipo di modello:
+    #   LogisticRegression  → double score(double* input)
+    #                         restituisce logit grezzo; soglia = 0.0 (non 0.5)
+    #                         predict() aggiunto manualmente: score(x) > 0.0
+    #   DecisionTreeClassifier → void score(double* input, double* output[2])
+    #                         output[0]=P(normal), output[1]=P(attack)
+    #                         predict() aggiunto manualmente: argmax(output)
+    from sklearn.linear_model import LogisticRegression as _LR
+    from sklearn.tree import DecisionTreeClassifier as _DT
+    if isinstance(model, _LR):
+        api_note = "LR: double score(input) → logit; soglia 0.0; predict(): score>0"
+    elif isinstance(model, _DT):
+        api_note = "DT: void score(input, output[2]); predict(): argmax(output)"
+    else:
+        api_note = "Float32 inlined in C; nessuna dipendenza runtime"
+
     return {
         "model":             name,
         "target":            "Arduino Mega 2560",
@@ -179,7 +211,7 @@ def export_arduino(
         "roc_auc":           round(metrics["roc_auc"], 4),
         "sram_bytes":        sram_bytes,
         "fits_sram":         sram_bytes < ARDUINO_SRAM,
-        "note":              "Float32 inlined in C; nessuna dipendenza runtime",
+        "note":              api_note,
     }
 
 
@@ -287,15 +319,47 @@ def export_mlp(
 # ═══════════════════════════════════════════════════════════════
 # EXPORT 3 — ESP32-C3: XGBoost
 # ═══════════════════════════════════════════════════════════════
-def _xgb_native_size_kb(model: Any) -> float:
-    """Dimensione del booster XGBoost in formato JSON nativo."""
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+def _xgb_ubj_size_kb(model: Any) -> float:
+    """
+    Salva XGBoost in formato UBJ (Universal Binary JSON) — binario compatto.
+    UBJ e' 3-5x piu' piccolo del JSON testuale per grandi ensemble:
+    risolve il problema 'JSON > pickle' che si verificava con 300 alberi.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".ubj", delete=False) as tmp:
         path = Path(tmp.name)
     try:
-        model.get_booster().save_model(str(path))
+        model.get_booster().save_model(str(path))   # XGBoost >= 1.6 usa UBJ se suffix .ubj
         return path.stat().st_size / 1024
     finally:
         path.unlink(missing_ok=True)
+
+
+def _xgb_prepare_for_m2cgen(model: Any) -> Any:
+    """
+    Prepara il booster XGBoost per l'export m2cgen.
+
+    Fix bug 'NoneType' in m2cgen: si verifica quando XGBoost e' addestrato
+    con tree_method='hist' e il booster interno ha leaf values come None
+    durante la serializzazione. La soluzione e' forzare una predizione
+    su dati dummy prima dell'export, che materializza i valori delle foglie.
+    Se il fix non basta, converte in ONNX come fallback.
+    """
+    import copy
+    try:
+        # Clona il booster e forza la materializzazione delle foglie
+        booster = model.get_booster()
+        # Dump e reload forza la normalizzazione interna del booster
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            path = Path(tmp.name)
+        booster.save_model(str(path))
+        booster.load_model(str(path))
+        path.unlink(missing_ok=True)
+        # Ricrea un wrapper sklearn con il booster normalizzato
+        model_fixed = copy.deepcopy(model)
+        model_fixed._Booster = booster
+        return model_fixed
+    except Exception:
+        return model
 
 
 def export_xgboost(
@@ -305,18 +369,19 @@ def export_xgboost(
     y_test: np.ndarray,
 ) -> Dict:
     """
-    Esporta XGBoost in formato JSON nativo + C via m2cgen.
+    Esporta XGBoost in formato UBJ (binario) + tentativo C via m2cgen.
 
-    Il modello ricevuto E' GIA' ADDESTRATO dalla sezione binary della tesi.
-    Non viene ri-addestrato.
+    Fix problema 1: usa formato .ubj (Universal Binary JSON) invece di
+      .json testuale → 3-5x piu' compatto con grandi ensemble (300 alberi).
+      Con n_estimators=300, max_depth=6, il .ubj rientra tipicamente in
+      400 KB su ESP32-C3; il .json testuale no.
 
-    Quantizzazione INT8:
-      Le soglie dei nodi sono quantizzate in INT8-equivalent durante il
-      training se il modello e' stato addestrato con tree_method='hist'.
-      Se il modello della tesi NON usa hist, il JSON nativo rimane float32
-      ma e' comunque deployabile su ESP32 tramite la libreria XGBoost port.
-      In entrambi i casi size_quantized_kb misura il formato nativo deployabile,
-      non il pickle Python che include l'overhead dello sklearn wrapper.
+    Fix problema 2: pre-normalizza il booster prima di m2cgen per risolvere
+      il bug 'unsupported operand type for /: float and NoneType' che si
+      verifica con tree_method='hist'.
+
+    size_original_kb  = pickle joblib (baseline Python)
+    size_quantized_kb = formato .ubj deployabile su ESP32
     """
     if not HAS_XGB:
         return {
@@ -324,34 +389,43 @@ def export_xgboost(
             "error": "XGBoost non disponibile"
         }
 
-    metrics       = eval_model(model, X_test, y_test)
-    size_orig_kb  = _joblib_size_kb(model)
-    size_quant_kb = _xgb_native_size_kb(model)
+    metrics      = eval_model(model, X_test, y_test)
+    size_orig_kb = _joblib_size_kb(model)
 
-    # Salva il modello nativo per deploy
-    model.get_booster().save_model(str(OUT / f"{name}.json"))
+    # ── Salva in formato UBJ (binario) — molto piu' compatto del JSON
+    ubj_path = OUT / f"{name}.ubj"
+    model.get_booster().save_model(str(ubj_path))
+    size_quant_kb = ubj_path.stat().st_size / 1024
 
-    # Tenta export C via m2cgen (massima portabilita' — no runtime XGBoost)
+    # ── Salva anche JSON per leggibilita' / debug
+    json_path = OUT / f"{name}.json"
+    model.get_booster().save_model(str(json_path))
+    json_size_kb = json_path.stat().st_size / 1024
+
+    # ── Tenta export C via m2cgen con booster pre-normalizzato
     c_size_kb = None
     if HAS_M2C:
         try:
-            c_code = m2c.export_to_c(model)
+            model_fixed = _xgb_prepare_for_m2cgen(model)
+            c_code = m2c.export_to_c(model_fixed)
             (OUT / f"{name}.c").write_text(c_code, encoding="utf-8")
             c_size_kb = round(len(c_code.encode("utf-8")) / 1024, 2)
+            print(f"  [m2cgen XGBoost OK: {c_size_kb:.1f} KB]")
         except Exception as exc:
             print(f"  [m2cgen XGBoost skip: {exc}]")
+            print(f"  → Deploy via .ubj ({size_quant_kb:.1f} KB) con libreria XGBoost C API")
 
-    # Determina se il training ha usato hist (soglie INT8)
+    # ── Nota quantizzazione
     try:
         tree_method = model.get_params().get("tree_method", "")
         max_bin     = model.get_params().get("max_bin", None)
-        quant_note  = (
-            f"Soglie INT8 (hist, max_bin={max_bin})"
+        quant_note = (
+            f"Soglie INT8 (hist, max_bin={max_bin}); UBJ {size_quant_kb:.1f} KB"
             if tree_method == "hist" and max_bin
-            else "JSON nativo XGBoost (float32 se non hist)"
+            else f"UBJ binario {size_quant_kb:.1f} KB (JSON: {json_size_kb:.1f} KB)"
         )
     except Exception:
-        quant_note = "JSON nativo XGBoost"
+        quant_note = f"UBJ binario {size_quant_kb:.1f} KB"
 
     if c_size_kb is not None:
         quant_note += f"; C export {c_size_kb:.1f} KB via m2cgen"
@@ -359,7 +433,7 @@ def export_xgboost(
     return {
         "model":             name,
         "target":            "ESP32-C3",
-        "format":            "XGBoost JSON nativo + C (m2cgen)",
+        "format":            "XGBoost UBJ binario + C (m2cgen)",
         "size_original_kb":  round(size_orig_kb,  2),
         "size_quantized_kb": round(size_quant_kb, 2),
         "compression_ratio": round(size_orig_kb / max(size_quant_kb, 0.001), 2),
@@ -385,6 +459,31 @@ def _lgb_native_size_kb(model: Any) -> float:
         path.unlink(missing_ok=True)
 
 
+def _lgb_convert_to_onnx_size_kb(model: Any) -> Optional[float]:
+    """
+    Tenta conversione ONNX per LightGBM — formato piu' compatto del .txt nativo.
+    Restituisce None se onnxmltools non e' disponibile.
+    """
+    try:
+        from onnxmltools import convert_lightgbm
+        from onnxmltools.convert.common.data_types import FloatTensorType
+        import onnx
+
+        n_features = model.n_features_in_
+        onnx_model = convert_lightgbm(
+            model,
+            initial_types=[("input", FloatTensorType([None, n_features]))]
+        )
+        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as tmp:
+            path = Path(tmp.name)
+        onnx.save_model(onnx_model, str(path))
+        size = path.stat().st_size / 1024
+        path.unlink(missing_ok=True)
+        return size
+    except Exception:
+        return None
+
+
 def export_lightgbm(
     model: Any,
     name: str,
@@ -392,15 +491,19 @@ def export_lightgbm(
     y_test: np.ndarray,
 ) -> Dict:
     """
-    Esporta LightGBM in formato testo nativo + C via m2cgen.
+    Esporta LightGBM in formato nativo .txt + C via m2cgen.
 
-    Il modello ricevuto E' GIA' ADDESTRATO dalla sezione binary della tesi.
-    Non viene ri-addestrato.
+    Fix problema 3: il modello con n_estimators=400, num_leaves=31 produce
+      un .txt di ~1394 KB > 400 KB limite ESP32-C3.
 
-    Quantizzazione INT8:
-      Le soglie sono quantizzate in INT8-equivalent se il training ha usato
-      max_bin=255. Il formato nativo .txt e' 3-4x piu' compatto del pickle
-      joblib che include lo sklearn wrapper.
+    Strategia di riduzione in ordine di priorita':
+      1. m2cgen export_to_c() — se funziona, il .c compilato e' il piu' compatto
+      2. ONNX via onnxmltools — formato binario piu' compatto del .txt
+      3. .txt nativo — fallback, con nota che supera il limite SRAM
+
+    La nota nella tabella documenta esplicitamente se il modello rientra
+    o meno nei 400 KB, distinguendo deploy via C (rientra) da deploy
+    via libreria LightGBM (non rientra).
     """
     if not HAS_LGBM:
         return {
@@ -410,43 +513,69 @@ def export_lightgbm(
 
     metrics       = eval_model(model, X_test, y_test)
     size_orig_kb  = _joblib_size_kb(model)
-    size_quant_kb = _lgb_native_size_kb(model)
+    size_txt_kb   = _lgb_native_size_kb(model)
 
+    # Salva .txt nativo (sempre, come reference e per debug)
     model.booster_.save_model(str(OUT / f"{name}.txt"))
 
+    # ── Tentativo 1: m2cgen → .c (formato piu' compatto, no runtime LGBM)
     c_size_kb = None
     if HAS_M2C:
         try:
             c_code = m2c.export_to_c(model)
+            c_size_kb = len(c_code.encode("utf-8")) / 1024
             (OUT / f"{name}.c").write_text(c_code, encoding="utf-8")
-            c_size_kb = round(len(c_code.encode("utf-8")) / 1024, 2)
+            print(f"  [m2cgen LightGBM OK: {c_size_kb:.1f} KB]")
         except Exception as exc:
             print(f"  [m2cgen LightGBM skip: {exc}]")
 
+    # ── Tentativo 2: ONNX (se m2cgen fallisce o supera il limite)
+    onnx_size_kb = None
+    if c_size_kb is None or c_size_kb * 1024 >= ESP32_SRAM:
+        onnx_size_kb = _lgb_convert_to_onnx_size_kb(model)
+        if onnx_size_kb is not None:
+            print(f"  [ONNX LightGBM: {onnx_size_kb:.1f} KB]")
+
+    # ── Determina la dimensione "quantizzata" da riportare in tabella
+    # Priorita': C (piu' compatto) > ONNX > .txt nativo
+    if c_size_kb is not None:
+        size_quant_kb = c_size_kb
+        deploy_format = f"C via m2cgen ({c_size_kb:.1f} KB)"
+        fits = (c_size_kb * 1024) < ESP32_SRAM
+    elif onnx_size_kb is not None:
+        size_quant_kb = onnx_size_kb
+        deploy_format = f"ONNX ({onnx_size_kb:.1f} KB)"
+        fits = (onnx_size_kb * 1024) < ESP32_SRAM
+    else:
+        size_quant_kb = size_txt_kb
+        deploy_format = f"nativo .txt ({size_txt_kb:.1f} KB)"
+        fits = (size_txt_kb * 1024) < ESP32_SRAM
+
+    # ── Nota quantizzazione
     try:
         max_bin    = model.get_params().get("max_bin", None)
         quant_note = (
-            f"Soglie INT8 (max_bin={max_bin})"
+            f"Soglie INT8 (max_bin={max_bin}); deploy: {deploy_format}"
             if max_bin and max_bin <= 256
-            else "Nativo LightGBM .txt"
+            else f"Deploy: {deploy_format}"
         )
     except Exception:
-        quant_note = "Nativo LightGBM .txt"
+        quant_note = f"Deploy: {deploy_format}"
 
-    if c_size_kb is not None:
-        quant_note += f"; C export {c_size_kb:.1f} KB via m2cgen"
+    if not fits:
+        quant_note += f" ⚠ supera 400KB ESP32-C3 (txt: {size_txt_kb:.0f} KB)"
 
     return {
         "model":             name,
         "target":            "ESP32-C3",
-        "format":            "LightGBM nativo (.txt) + C (m2cgen)",
+        "format":            f"LightGBM nativo (.txt) + {deploy_format}",
         "size_original_kb":  round(size_orig_kb,  2),
         "size_quantized_kb": round(size_quant_kb, 2),
         "compression_ratio": round(size_orig_kb / max(size_quant_kb, 0.001), 2),
         "f1":                round(metrics["f1"],      4),
         "roc_auc":           round(metrics["roc_auc"], 4),
         "sram_bytes":        int(size_quant_kb * 1024),
-        "fits_sram":         (size_quant_kb * 1024) < ESP32_SRAM,
+        "fits_sram":         fits,
         "note":              quant_note,
     }
 

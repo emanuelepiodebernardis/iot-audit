@@ -189,6 +189,10 @@ def get_models(
             # Necessario per un export corretto su ESP32-C3.
             tree_method="hist",
             max_bin=256,
+            # predictor='cpu_predictor': forza la materializzazione dei leaf
+            # values nel booster interno. Risolve il bug m2cgen
+            # 'NoneType' che si verifica con tree_method='hist' su Windows.
+            predictor="cpu_predictor",
             random_state=random_state,
             n_jobs=-1,
             eval_metric="logloss" if task == "binary" else "mlogloss",
