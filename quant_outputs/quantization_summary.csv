@@ -1,0 +1,6 @@
+model,target,format,size_original_kb,size_quantized_kb,compression_ratio,f1,roc_auc,sram_bytes,fits_sram,note
+logreg,Arduino Mega 2560,C (m2cgen),4.42,3.2,1.38,0.99,0.9945,3281,True,Float32 inlined in C; nessuna dipendenza runtime
+tree_depth5,Arduino Mega 2560,C (m2cgen),8.07,4.76,1.7,0.9943,0.9856,4875,True,Float32 inlined in C; nessuna dipendenza runtime
+mlp,ESP32-C3,TFLite Micro INT8 (.tflite + .h),121.69,13.03,9.34,0.9959,0.9993,13344,True,INT8 full-integer; input/output int8; calib 200 campioni
+xgboost,ESP32-C3,XGBoost JSON nativo + C (m2cgen),771.08,1112.65,0.69,0.9989,1.0,1139351,False,"Soglie INT8 (hist, max_bin=256)"
+lightgbm,ESP32-C3,LightGBM nativo (.txt) + C (m2cgen),1396.24,1394.28,1.0,0.9992,1.0,1427738,False,Soglie INT8 (max_bin=255); C export 2390.0 KB via m2cgen

@@ -23,7 +23,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, label_binarize
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, clone
 
 from sklearn.metrics import (
     accuracy_score,
@@ -37,6 +37,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import StratifiedKFold
 
 from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 
 # Optional models
@@ -73,9 +74,6 @@ class DataFramePreprocessor(BaseEstimator, TransformerMixin):
         self.column_transformer = column_transformer
 
     def fit(self, X, y=None):
-        # Forza output denso: senza questo, con OneHotEncoder sparse,
-        # il toarray() implicito in DataFrame() fallirebbe.
-        self.column_transformer.set_params(sparse_threshold=0)
         self.column_transformer.fit(X, y)
         self._feature_names = self.column_transformer.get_feature_names_out()
         return self
@@ -165,6 +163,13 @@ def get_models(
         random_state=random_state,
     )
 
+    # Decision Tree shallow — esportabile in C via m2cgen per Arduino Mega 2560.
+    # max_depth=5 garantisce al massimo 31 nodi: codice C compatto e < 8 KB SRAM.
+    models["Decision Tree"] = DecisionTreeClassifier(
+        max_depth=5,
+        random_state=random_state,
+    )
+
     models["Random Forest"] = RandomForestClassifier(
         n_estimators=300,
         random_state=random_state,
@@ -179,9 +184,15 @@ def get_models(
             subsample=0.8,
             colsample_bytree=0.8,
             reg_lambda=1.0,
+            # tree_method='hist' + max_bin=256: quantizza le soglie dei nodi
+            # in 256 bucket (INT8-equivalent) durante il training.
+            # Necessario per un export corretto su ESP32-C3.
+            tree_method="hist",
+            max_bin=256,
             random_state=random_state,
             n_jobs=-1,
             eval_metric="logloss" if task == "binary" else "mlogloss",
+            verbosity=0,
         )
 
     if HAS_LGBM:
@@ -191,9 +202,12 @@ def get_models(
             num_leaves=31,
             subsample=0.8,
             colsample_bytree=0.8,
+            # max_bin=255: quantizza le soglie in INT8-equivalent durante training.
+            # Necessario per un export corretto su ESP32-C3.
+            max_bin=255,
             random_state=random_state,
             n_jobs=-1,
-            verbose=-1,               # silenzia log LightGBM interni
+            verbose=-1,
         )
 
     return models
@@ -369,7 +383,7 @@ def cross_validate_binary_models(
 
             pipe = Pipeline([
                 ("preprocessor", preprocessor),
-                ("model", estimator),
+                ("model", clone(estimator)),   # clone obbligatorio: evita contaminazione tra fold
             ])
 
             pipe.fit(X_train, y_train)
