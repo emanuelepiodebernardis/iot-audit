@@ -1,12 +1,46 @@
-numpy>=1.23
-pandas>=1.5
-scikit-learn>=1.2
-xgboost>=1.7
-lightgbm>=3.3
-matplotlib>=3.5
-seaborn>=0.12
-joblib>=1.2
-shap>=0.41
-jupyter>=1.0
-ipykernel>=6.0
-kagglehub>=0.2
+# ============================================================
+# requirements.txt — IoT Intrusion Detection System (Tesi)
+# Dataset: TON_IoT | Modelli embedded: Arduino + ESP32-C3
+# ============================================================
+# Testato su Python 3.11 (consigliato)
+# NOTA: TensorFlow non supporta Python 3.13 su Windows.
+#       Usare Python 3.11 per generare l'MLP TFLite.
+#       Su Python 3.13 tutti gli altri modelli funzionano.
+# ============================================================
+# Installazione:
+#   pip install -r requirements.txt
+# ============================================================
+
+# ── Core scientifico ────────────────────────────────────────
+numpy>=1.26.0
+pandas>=2.0.0
+scipy>=1.11.0
+
+# ── Machine Learning ────────────────────────────────────────
+scikit-learn>=1.3.0
+xgboost>=2.0.0
+lightgbm>=4.0.0
+
+# ── Deep Learning (MLP + TFLite export) ────────────────────
+# NOTA: su Python 3.13 usare tensorflow-cpu invece di tensorflow
+tensorflow>=2.13.0
+# tensorflow-cpu>=2.13.0  # alternativa per Python 3.13 / no GPU
+
+# ── Export modelli embedded ─────────────────────────────────
+m2cgen>=0.10.0            # export C per Arduino (LR, DT)
+
+# ── Visualizzazione ─────────────────────────────────────────
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# ── Explainability ──────────────────────────────────────────
+shap>=0.43.0
+
+# ── Utilities ───────────────────────────────────────────────
+joblib>=1.3.0
+kagglehub>=0.2.0          # download dataset TON_IoT
+
+# ── Jupyter ─────────────────────────────────────────────────
+jupyter>=1.0.0
+ipykernel>=6.0.0
+ipython>=8.0.0
