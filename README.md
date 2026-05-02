@@ -49,8 +49,7 @@ evaluation under class imbalance conditions typical of real-world security datas
 
 robustness assessment under cross-domain shift (TON → CIC IoT 2023)
 
-benchmarking of computational efficiency (latency + model size) for deployable IDS scenarios
-integration of model interpretability via SHAP-based explanations
+benchmarking of computational efficiency (latency + model size) for deployable IDS scenarios integration of model interpretability via SHAP-based explanations
 ---
 
 ## Pipeline Overview
