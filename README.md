@@ -39,17 +39,18 @@ DoS / DDoS attacks
 
 Man-in-the-Middle (MITM) attacks
 
-botnet activity
+Botnet activity
 
-injection and reconnaissance-based attacks
+Injection and reconnaissance-based attacks
 
-ransomware-related traffic patterns
+Ransomware-related traffic patterns
 
-evaluation under class imbalance conditions typical of real-world security datasets
+Evaluation under class imbalance conditions typical of real-world security datasets
 
-robustness assessment under cross-domain shift (TON → CIC IoT 2023)
+Robustness assessment under cross-domain shift (TON → CIC IoT 2023)
 
-benchmarking of computational efficiency (latency + model size) for deployable IDS scenarios integration of model interpretability via SHAP-based explanations
+Benchmarking of computational efficiency (latency + model size) for deployable IDS scenarios integration of model interpretability via SHAP-based explanations
+
 ---
 
 ## Pipeline Overview
