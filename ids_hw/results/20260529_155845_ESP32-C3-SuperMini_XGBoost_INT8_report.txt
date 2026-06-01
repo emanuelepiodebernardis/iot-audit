@@ -1,0 +1,24 @@
+﻿============================================================
+  HARDWARE BENCHMARK RESULTS
+============================================================
+  Timestamp  : 20260529_155845
+  Model      : XGBoost_INT8
+  Board      : ESP32-C3-SuperMini
+  F1 (test)  : 0.9989     ROC-AUC : 1.0000
+  Size       : 369.52 KB
+  SRAM used  : 100792 B (98,43 KB)
+  Samples    : 500   Accuracy on hw : 1,0000
+
+  Latency per inference:
+    mean = 8238,7 us    std = 431,9 us
+    min  = 7801 us    max = 8683 us
+
+------------------------------------------------------------
+  PAPER-READY BLOCK
+------------------------------------------------------------
+  Model: XGBoost_INT8 | Board: ESP32-C3-SuperMini
+  Inference latency: 8238,7 +/- 431,9 us (min 7801, max 8683)
+  SRAM usage: 100792 B (98,43 KB)
+  F1 (TON_IoT test set): 0.9989  |  ROC-AUC: 1.0000
+  Model size: 369.52 KB
+------------------------------------------------------------

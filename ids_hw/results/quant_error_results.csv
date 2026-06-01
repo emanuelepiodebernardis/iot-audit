@@ -1,0 +1,3 @@
+Model,Format,n_trees,n_features,size_KB,thr_scale_s_t,leaf_scale_s_l,lossless_thresholds,max_thr_err,max_leaf_err,F1_float,F1_int8,F1_delta,agreement_pct,class_change_pct,hw_samples,hw_correct
+LightGBM,INT8 LGBI v2,400,95,73.85,0.2254322,0.0345445,True,0.0,0.0172723,0.9992,0.9992,0.0,100.0,0.0,40,40
+XGBoost,INT8 XGBI v2,300,95,369.52,0.2698692,0.0041886,False,0.1349346,0.0020943,0.9989,0.9989,0.0,100.0,0.0,40,40
