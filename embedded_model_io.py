@@ -47,7 +47,7 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────────────────────
 XGB_MAGIC   = b"XGBI"
 LGB_MAGIC   = b"LGBI"
-FORMAT_VER  = 2
+FORMAT_VER  = 3   # v3: threshold quantizzati per-albero
 
 ARDUINO_SRAM_BYTES = 8   * 1024
 ESP32_SRAM_BYTES   = 400 * 1024
@@ -65,6 +65,22 @@ def _quantize(arr: np.ndarray) -> tuple[np.ndarray, float]:
     scale = max(abs(float(arr.min())), abs(float(arr.max()))) / 127.0
     scale = max(scale, 1e-8)
     q = np.clip(np.round(arr / scale), -128, 127).astype(np.int8)
+    return q, float(scale)
+
+
+def _quantize_floor(arr: np.ndarray) -> tuple[np.ndarray, float]:
+    """
+    Quantizza array float32 a int8 usando floor invece di round.
+
+    Garantisce dequant(quant(thr)) <= thr per ogni elemento,
+    condizione necessaria per replicare esattamente il confronto
+    strict x < thr di XGBoost e LightGBM dopo dequantizzazione.
+    Usare questa funzione SOLO per i threshold di split, non per
+    i valori foglia (che non hanno questo vincolo direzionale).
+    """
+    scale = max(abs(float(arr.min())), abs(float(arr.max()))) / 127.0
+    scale = max(scale, 1e-8)
+    q = np.clip(np.floor(arr / scale), -128, 127).astype(np.int8)
     return q, float(scale)
 
 
@@ -175,8 +191,8 @@ def save_xgb_int8(model: Any, path: Union[str, Path]) -> int:
 
     leaves_arr = np.array(all_leaves,     dtype=np.float32)
     thr_arr    = np.array(all_thresholds, dtype=np.float32)
-    leaves_q, leaf_scale = _quantize(leaves_arr)
-    thr_q,    thr_scale  = _quantize(thr_arr)
+    leaves_q, leaf_scale = _quantize(leaves_arr)       # round OK per le foglie
+    thr_q,    thr_scale  = _quantize_floor(thr_arr)   # floor: garantisce dequant(thr) <= thr
 
     buf = bytearray()
 
@@ -244,7 +260,9 @@ class XGBInt8Model:
         while not tree["is_leaf"][node]:
             feat  = tree["si"][node]
             thr   = self._split_thresholds[tree["thr_ptr"][node]]
-            node  = tree["lc"][node] if x[feat] <= thr else tree["rc"][node]
+            # XGBoost usa confronto STRICT x < thr per andare a sinistra.
+            # Con <= si sbaglia il ramo quando x[feat] == thr (tipico per OHE 0/1).
+            node  = tree["lc"][node] if x[feat] < thr else tree["rc"][node]
         return self._leaf_values[tree["leaf_ptr"][node]]
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
@@ -315,7 +333,7 @@ def load_xgb_int8(path: Union[str, Path]) -> XGBInt8Model:
     if version != FORMAT_VER:
         raise ValueError(f"Versione non supportata: {version} (attesa {FORMAT_VER})")
 
-    # STRUTTURA ALBERI
+    # STRUTTURA ALBERI v3: thr_ptr globali (come v2)
     trees = []
     for _ in range(n_trees):
         n = struct.unpack_from("<I", data, offset)[0]; offset += 4
@@ -330,32 +348,27 @@ def load_xgb_int8(path: Union[str, Path]) -> XGBInt8Model:
             "is_leaf": is_leaf, "leaf_ptr": leaf_ptr, "thr_ptr": thr_ptr,
         })
 
-    # DATI QUANTIZZATI
-    # Calcola n_leaves e n_thresholds dai puntatori
+    # DATI v3: foglie INT8 + threshold float32 esatti
     n_leaves = max(
-        max((p for t in trees for p in t["leaf_ptr"] if p >= 0), default=0) + 1,
-        1
+        max((p for t in trees for p in t["leaf_ptr"] if p >= 0), default=0) + 1, 1
     )
     n_thresholds = max(
-        max((p for t in trees for p in t["thr_ptr"] if p >= 0), default=0) + 1,
-        1
+        max((p for t in trees for p in t["thr_ptr"] if p >= 0), default=0) + 1, 1
     )
-
-    leaves_q = np.frombuffer(data, dtype=np.int8,
-                              count=n_leaves, offset=offset)
+    leaves_q     = np.frombuffer(data, dtype=np.int8,
+                                 count=n_leaves, offset=offset).copy()
     offset += n_leaves
-    thr_q    = np.frombuffer(data, dtype=np.int8,
-                              count=n_thresholds, offset=offset)
-
-    leaf_values      = _dequantize(leaves_q, leaf_scale)
-    split_thresholds = _dequantize(thr_q,    thr_scale)
+    # threshold float32 esatti — nessuna perdita di precisione
+    split_thresholds = np.frombuffer(data, dtype=np.float32,
+                                     count=n_thresholds, offset=offset).copy()
+    leaf_values = _dequantize(leaves_q, leaf_scale)
 
     return XGBInt8Model(
         trees=trees,
         leaf_values=leaf_values,
         split_thresholds=split_thresholds,
         leaf_scale=leaf_scale,
-        thr_scale=thr_scale,
+        thr_scale=0.0,
         n_features=n_features,
     )
 
@@ -453,8 +466,8 @@ def save_lgb_int8(model: Any, path: Union[str, Path]) -> int:
     n_trees  = len(tree_n_splits)
     thr_arr  = np.array(all_thr,  dtype=np.float32)
     leaf_arr = np.array(all_leaf, dtype=np.float32)
-    thr_q,  ts = _quantize(thr_arr)
-    leaf_q, ls = _quantize(leaf_arr)
+    thr_q,  ts = _quantize_floor(thr_arr)   # floor: garantisce dequant(thr) <= thr
+    leaf_q, ls = _quantize(leaf_arr)         # round OK per le foglie
 
     buf = bytearray()
 
@@ -519,35 +532,33 @@ class LGBInt8Model:
         self.n_estimators_  = len(tree_metadata)
 
     def _predict_sample(self, x: np.ndarray) -> float:
-        """Somma i contributi di tutti gli alberi per un campione."""
+        """Somma i contributi di tutti gli alberi per un campione.
+        
+        Navigazione esatta con left_child/right_child espliciti di LightGBM.
+        Valori child: >= 0 = nodo interno, < 0 = foglia (indice = -val - 1).
+        """
         score = 0.0
         for meta in self._meta:
             thr_off  = meta["thr_offset"]
             leaf_off = meta["leaf_offset"]
             feats    = meta["features"]
+            lc       = meta["left_child"]
+            rc       = meta["right_child"]
             thrs     = self._thresholds[thr_off: thr_off + meta["n_splits"]]
             leaves   = self._leaf_values[leaf_off: leaf_off + meta["n_leaves"]]
 
-            # LightGBM: navigazione semplificata (decision stump per ogni albero)
-            # Versione esatta richiede la struttura left/right — qui usiamo
-            # l'approssimazione che la foglia attivata e' quella il cui indice
-            # corrisponde al bin della feature principale.
-            # Per un'implementazione esatta serve la struttura completa dell'albero
-            # (salvata nel .bin tramite save_lgb_int8 con left/right children).
             node = 0
-            n_splits = meta["n_splits"]
-            while node < n_splits:
+            while True:
                 feat = feats[node] if node < len(feats) else 0
                 feat = min(feat, len(x) - 1)
-                if x[feat] <= thrs[node]:
-                    node = 2 * node + 1
-                else:
-                    node = 2 * node + 2
-                if node >= n_splits:
+                # LightGBM usa confronto STRICT x < thr per andare a sinistra
+                next_node = lc[node] if x[feat] < thrs[node] else rc[node]
+                if next_node < 0:
+                    # Foglia: indice = -next_node - 1
+                    leaf_idx = min(-next_node - 1, meta["n_leaves"] - 1)
+                    score += leaves[leaf_idx]
                     break
-
-            leaf_idx = min(node - n_splits, meta["n_leaves"] - 1)
-            score += leaves[max(leaf_idx, 0)]
+                node = next_node
         return score
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
@@ -599,38 +610,44 @@ def load_lgb_int8(path: Union[str, Path]) -> LGBInt8Model:
     if version != FORMAT_VER:
         raise ValueError(f"Versione non supportata: {version} (attesa {FORMAT_VER})")
 
-    # METADATA ALBERI
-    tree_metadata = []
-    thr_offset    = 0
-    leaf_offset   = 0
+    # METADATA ALBERI v3: ns, nl, features[ns], left_child[ns], right_child[ns]
+    tree_metadata   = []
+    thr_offset_acc  = 0
+    leaf_offset_acc = 0
 
     for _ in range(n_trees):
         ns, nl = struct.unpack_from("<II", data, offset); offset += 8
-        feats  = list(struct.unpack_from(f"<{ns}I", data, offset)) if ns > 0 else []
+        feats = list(struct.unpack_from(f"<{ns}I", data, offset)) if ns > 0 else []
+        offset += ns * 4
+        lc = list(struct.unpack_from(f"<{ns}i", data, offset)) if ns > 0 else []
+        offset += ns * 4
+        rc = list(struct.unpack_from(f"<{ns}i", data, offset)) if ns > 0 else []
         offset += ns * 4
         tree_metadata.append({
-            "n_splits":   ns,
-            "n_leaves":   nl,
-            "features":   feats,
-            "thr_offset": thr_offset,
-            "leaf_offset": leaf_offset,
+            "n_splits":    ns,
+            "n_leaves":    nl,
+            "features":    feats,
+            "left_child":  lc,
+            "right_child": rc,
+            "thr_offset":  thr_offset_acc,
+            "leaf_offset": leaf_offset_acc,
         })
-        thr_offset  += ns
-        leaf_offset += nl
+        thr_offset_acc  += ns
+        leaf_offset_acc += nl
 
-    # DATI QUANTIZZATI
-    thr_q  = np.frombuffer(data, dtype=np.int8, count=thr_offset,  offset=offset)
-    offset += thr_offset
-    leaf_q = np.frombuffer(data, dtype=np.int8, count=leaf_offset, offset=offset)
-
-    thresholds  = _dequantize(thr_q,  thr_scale)
+    # DATI v3: threshold float32 (tutti) + foglie INT8 (tutte)
+    thresholds = np.frombuffer(data, dtype=np.float32,
+                               count=thr_offset_acc, offset=offset).copy()
+    offset += thr_offset_acc * 4
+    leaf_q     = np.frombuffer(data, dtype=np.int8,
+                               count=leaf_offset_acc, offset=offset).copy()
     leaf_values = _dequantize(leaf_q, leaf_scale)
 
     return LGBInt8Model(
         tree_metadata=tree_metadata,
         all_thresholds=thresholds,
         all_leaf_values=leaf_values,
-        thr_scale=thr_scale,
+        thr_scale=0.0,
         leaf_scale=leaf_scale,
         n_features=n_features,
     )

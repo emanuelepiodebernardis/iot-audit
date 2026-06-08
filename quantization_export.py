@@ -136,6 +136,21 @@ def _quantize_array_int8(arr: np.ndarray):
     return q, float(scale)
 
 
+def _quantize_array_int8_floor(arr: np.ndarray):
+    """
+    Quantizza array float32 a int8 usando floor invece di round.
+
+    Garantisce dequant(quant(thr)) <= thr per ogni elemento,
+    condizione necessaria affinche' il confronto strict x < thr
+    (semantica XGBoost/LightGBM) rimanga corretto dopo dequantizzazione.
+    Usare SOLO per i threshold di split, non per i valori foglia.
+    """
+    scale = max(abs(float(arr.min())), abs(float(arr.max()))) / 127.0
+    scale = max(scale, 1e-8)
+    q = np.clip(np.floor(arr / scale), -128, 127).astype(np.int8)
+    return q, float(scale)
+
+
 # ═══════════════════════════════════════════════════════════════
 # EXPORT 1 — Arduino Mega 2560: LR e DT via m2cgen
 # ═══════════════════════════════════════════════════════════════
@@ -359,25 +374,33 @@ def _xgb_int8_binary(model: Any) -> float:
             "thresh_map": thresh_map,
         })
 
-    leaves_arr     = np.array(all_leaves,     dtype=np.float32)
-    thresholds_arr = np.array(all_thresholds, dtype=np.float32)
-    leaves_q,     leaf_scale = _quantize_array_int8(leaves_arr)
-    thresholds_q, thr_scale  = _quantize_array_int8(thresholds_arr)
+    # ── Quantizzazione foglie: INT8 con scala globale ────────────────────
+    leaves_arr = np.array(all_leaves, dtype=np.float32)
+    leaves_q, leaf_scale = _quantize_array_int8(leaves_arr)
 
-    # ── Serializzazione ───────────────────────────────────────────────────
+    # ── Threshold: float32 esatti ─────────────────────────────────────────
+    # Il dataset mescola feature OHE (0/1) e feature continue (0-34).
+    # Con INT8 e scala globale o per-albero la precisione e' insufficiente:
+    # thr=1.0 diventa 0.887, thr=0.919 diventa 0.887 — stesso valore,
+    # routing diverso. I threshold sono salvati come float32 (4 byte)
+    # invece di int8 (1 byte): compressione minore ma routing esatto.
+    # Le foglie restano INT8: e' li' che si concentra la massa dei dati.
+    thresholds_arr = np.array(all_thresholds, dtype=np.float32)
+
+    # ── Serializzazione v3 ────────────────────────────────────────────────
     buf = bytearray()
 
-    # HEADER
+    # HEADER v3: thr_scale = 0.0 indica threshold float32 esatti
     buf += struct.pack("<4sHIIff",
         b"XGBI",
-        2,                   # version
-        len(trees),          # n_trees
-        n_features,          # n_features
+        3,
+        len(trees),
+        n_features,
         float(leaf_scale),
-        float(thr_scale),
+        0.0,
     )
 
-    # STRUTTURA ALBERI
+    # STRUTTURA ALBERI (thr_ptr globali come in v2)
     for ts in tree_structs:
         n = ts["n"]
         buf += struct.pack("<I", n)
@@ -385,16 +408,14 @@ def _xgb_int8_binary(model: Any) -> float:
         buf += struct.pack(f"<{n}i", *ts["rc"])
         buf += struct.pack(f"<{n}I", *ts["si"])
         buf += bytes(bytearray(ts["is_leaf"]))
-        # Puntatori nodo → indice in array quantizzato (leaf_ptr e thr_ptr)
-        # -1 = non applicabile (nodo interno per leaf_ptr, foglia per thr_ptr)
-        leaf_ptr   = [ts["leaf_map"].get(i, -1)   for i in range(n)]
-        thr_ptr    = [ts["thresh_map"].get(i, -1) for i in range(n)]
+        leaf_ptr = [ts["leaf_map"].get(i, -1)   for i in range(n)]
+        thr_ptr  = [ts["thresh_map"].get(i, -1) for i in range(n)]
         buf += struct.pack(f"<{n}i", *leaf_ptr)
         buf += struct.pack(f"<{n}i", *thr_ptr)
 
-    # DATI QUANTIZZATI
+    # DATI: foglie INT8 + threshold float32
     buf += bytes(leaves_q.tobytes())
-    buf += bytes(thresholds_q.tobytes())
+    buf += bytes(thresholds_arr.tobytes())
 
     bin_path = OUT / "xgboost_int8.bin"
     bin_path.write_bytes(bytes(buf))
@@ -496,17 +517,19 @@ def _lgb_int8_binary(model: Any) -> float:
     finally:
         path.unlink(missing_ok=True)
 
-    import re as _re
-
-    all_thr      = []
-    all_leaf     = []
+    all_thr       = []
+    all_leaf      = []
     tree_n_leaves = []
     tree_n_splits = []
-    tree_features = []  # lista di liste: feature index per ogni split di ogni albero
+    tree_features = []
+    tree_lc       = []   # left_child per albero (indici espliciti LightGBM)
+    tree_rc       = []   # right_child per albero
 
     current_leaves = []
     current_splits = []
     current_feats  = []
+    current_lc     = []
+    current_rc     = []
     in_tree = False
 
     for line in txt.split("\n"):
@@ -516,11 +539,15 @@ def _lgb_int8_binary(model: Any) -> float:
                 tree_n_leaves.append(len(current_leaves))
                 tree_n_splits.append(len(current_splits))
                 tree_features.append(current_feats[:])
+                tree_lc.append(current_lc[:])
+                tree_rc.append(current_rc[:])
                 all_thr.extend(current_splits)
                 all_leaf.extend(current_leaves)
             current_leaves = []
             current_splits = []
             current_feats  = []
+            current_lc     = []
+            current_rc     = []
             in_tree = True
         elif line.startswith("threshold=") and in_tree:
             current_splits = [float(v) for v in line[10:].split()]
@@ -528,54 +555,60 @@ def _lgb_int8_binary(model: Any) -> float:
             current_leaves = [float(v) for v in line[11:].split()]
         elif line.startswith("split_feature=") and in_tree:
             current_feats = [int(v) for v in line[14:].split()]
+        elif line.startswith("left_child=") and in_tree:
+            current_lc = [int(v) for v in line[11:].split()]
+        elif line.startswith("right_child=") and in_tree:
+            current_rc = [int(v) for v in line[12:].split()]
 
-    # flush ultimo albero
     if in_tree:
         tree_n_leaves.append(len(current_leaves))
         tree_n_splits.append(len(current_splits))
         tree_features.append(current_feats[:])
+        tree_lc.append(current_lc[:])
+        tree_rc.append(current_rc[:])
         all_thr.extend(current_splits)
         all_leaf.extend(current_leaves)
 
     if not all_thr or not all_leaf:
         return _joblib_size_kb(model)
 
-    n_trees   = len(tree_n_leaves)
+    n_trees = len(tree_n_leaves)
     try:
         n_features = model.n_features_in_
     except Exception:
         n_features = max(max(f) for f in tree_features if f) + 1 if tree_features else 0
 
-    thr_arr  = np.array(all_thr,  dtype=np.float32)
+    # ── Quantizzazione foglie: INT8 ───────────────────────────────────────
     leaf_arr = np.array(all_leaf, dtype=np.float32)
-    thr_q,  ts = _quantize_array_int8(thr_arr)
     leaf_q, ls = _quantize_array_int8(leaf_arr)
 
-    # ── Serializzazione ───────────────────────────────────────────────────
+    # ── Threshold: float32 esatti ─────────────────────────────────────────
+    thr_arr = np.array(all_thr, dtype=np.float32)
+
+    # ── Serializzazione v3 ────────────────────────────────────────────────
     buf = bytearray()
 
-    # HEADER
     buf += struct.pack("<4sHIIff",
-        b"LGBI",
-        2,            # version
-        n_trees,
-        n_features,
-        float(ts),
-        float(ls),
-    )
+        b"LGBI", 3, n_trees, n_features, 0.0, float(ls))
 
-    # METADATA ALBERI
+    # METADATA ALBERI: ns, nl, features[ns], left_child[ns], right_child[ns]
+    # Valori left/right_child: >= 0 → nodo interno, < 0 → foglia (-1=leaf0, -2=leaf1...)
     for i in range(n_trees):
         ns = tree_n_splits[i]
         nl = tree_n_leaves[i]
         buf += struct.pack("<II", ns, nl)
         feats = tree_features[i] if i < len(tree_features) else [0] * ns
-        if len(feats) < ns:
-            feats = feats + [0] * (ns - len(feats))
+        if len(feats) < ns: feats = feats + [0] * (ns - len(feats))
         buf += struct.pack(f"<{ns}I", *feats[:ns])
+        lc = tree_lc[i] if i < len(tree_lc) else [-1] * ns
+        rc = tree_rc[i] if i < len(tree_rc) else [-1] * ns
+        if len(lc) < ns: lc = lc + [-1] * (ns - len(lc))
+        if len(rc) < ns: rc = rc + [-1] * (ns - len(rc))
+        buf += struct.pack(f"<{ns}i", *lc[:ns])
+        buf += struct.pack(f"<{ns}i", *rc[:ns])
 
-    # DATI QUANTIZZATI
-    buf += bytes(thr_q.tobytes())
+    # DATI: threshold float32 + foglie INT8
+    buf += bytes(thr_arr.tobytes())
     buf += bytes(leaf_q.tobytes())
 
     bin_path = OUT / "lightgbm_int8.bin"
