@@ -424,24 +424,33 @@ def save_lgb_int8(model: Any, path: Union[str, Path]) -> int:
     tree_n_splits = []
     tree_n_leaves = []
     tree_features = []
+    tree_lc       = []   # left_child per albero
+    tree_rc       = []   # right_child per albero
 
     current_splits  = []
     current_leaves  = []
     current_feats   = []
+    current_lc      = []
+    current_rc      = []
     in_tree = False
 
     for line in txt.split("\n"):
         line = line.strip()
         if line.startswith("Tree="):
             if in_tree:
-                tree_n_splits.append(len(current_splits))
+                ns = len(current_splits)
+                tree_n_splits.append(ns)
                 tree_n_leaves.append(len(current_leaves))
                 tree_features.append(current_feats[:])
+                tree_lc.append(current_lc[:])
+                tree_rc.append(current_rc[:])
                 all_thr.extend(current_splits)
                 all_leaf.extend(current_leaves)
             current_splits = []
             current_leaves = []
             current_feats  = []
+            current_lc     = []
+            current_rc     = []
             in_tree = True
         elif line.startswith("threshold=") and in_tree:
             current_splits = [float(v) for v in line[10:].split()]
@@ -449,11 +458,18 @@ def save_lgb_int8(model: Any, path: Union[str, Path]) -> int:
             current_leaves = [float(v) for v in line[11:].split()]
         elif line.startswith("split_feature=") and in_tree:
             current_feats = [int(v) for v in line[14:].split()]
+        elif line.startswith("left_child=") and in_tree:
+            current_lc = [int(v) for v in line[11:].split()]
+        elif line.startswith("right_child=") and in_tree:
+            current_rc = [int(v) for v in line[12:].split()]
 
     if in_tree:
-        tree_n_splits.append(len(current_splits))
+        ns = len(current_splits)
+        tree_n_splits.append(ns)
         tree_n_leaves.append(len(current_leaves))
         tree_features.append(current_feats[:])
+        tree_lc.append(current_lc[:])
+        tree_rc.append(current_rc[:])
         all_thr.extend(current_splits)
         all_leaf.extend(current_leaves)
 
@@ -466,28 +482,40 @@ def save_lgb_int8(model: Any, path: Union[str, Path]) -> int:
     n_trees  = len(tree_n_splits)
     thr_arr  = np.array(all_thr,  dtype=np.float32)
     leaf_arr = np.array(all_leaf, dtype=np.float32)
-    thr_q,  ts = _quantize_floor(thr_arr)   # floor: garantisce dequant(thr) <= thr
-    leaf_q, ls = _quantize(leaf_arr)         # round OK per le foglie
+    # v3: threshold salvati come float32 esatti (no perdita di precisione)
+    # foglie quantizzate INT8 con round
+    leaf_q, ls = _quantize(leaf_arr)
 
     buf = bytearray()
 
-    # HEADER
+    # HEADER  (thr_scale=0.0 perché i threshold sono float32 esatti)
     buf += struct.pack("<4sHIIff",
         LGB_MAGIC, FORMAT_VER, n_trees, n_features,
-        float(ts), float(ls))
+        0.0, float(ls))
 
-    # METADATA ALBERI
+    # METADATA ALBERI v3: ns, nl, feats[ns], left_child[ns], right_child[ns]
     for i in range(n_trees):
         ns = tree_n_splits[i]
         nl = tree_n_leaves[i]
         buf += struct.pack("<II", ns, nl)
+
         feats = tree_features[i] if i < len(tree_features) else []
         if len(feats) < ns:
             feats = feats + [0] * (ns - len(feats))
         buf += struct.pack(f"<{ns}I", *feats[:ns])
 
-    # DATI QUANTIZZATI
-    buf += bytes(thr_q.tobytes())
+        lc = tree_lc[i] if i < len(tree_lc) else []
+        if len(lc) < ns:
+            lc = lc + [-1] * (ns - len(lc))
+        buf += struct.pack(f"<{ns}i", *lc[:ns])
+
+        rc = tree_rc[i] if i < len(tree_rc) else []
+        if len(rc) < ns:
+            rc = rc + [-1] * (ns - len(rc))
+        buf += struct.pack(f"<{ns}i", *rc[:ns])
+
+    # DATI v3: threshold float32 esatti + foglie INT8
+    buf += thr_arr.tobytes()    # float32 esatti — nessuna perdita di precisione
     buf += bytes(leaf_q.tobytes())
 
     path = Path(path)
